@@ -183,6 +183,10 @@ const AUDIUS_FALLBACK='https://discoveryprovider.audius.co';
 let AUDIUS=AUDIUS_FALLBACK;
 const APP='AURA';
 
+// Words that signal a track is NOT the original/official recording.
+// Any result whose title matches these is hidden from search + trending.
+const REMIX_RE=/\b(re-?mix(?:es|ed)?|re-?fix|re-?edit|\bedit\b|\bflip\b|bootleg|mash-?up|\bcover(?:ed)?\b|nightcore|sped[\s-]?up|slow(?:ed)?(?:\s?(?:down|reverb))?|reverb|\b8d\b|instrumental|karaoke|acapella|a-?capella|tribute|\blive\b|\bremake\b|made\s+famous|originally\s+performed|type\s+beat)\b/i;
+
 //////////////////// Storage ////////////////////
 const DB_NAME='aura-db', STORE='files', META='meta';
 let db;
@@ -226,17 +230,38 @@ function normalize(t){
   return{source:'audius',id:'aud_'+t.id,audiusId:t.id,
     title:t.title||'Untitled',artist:(t.user&&t.user.name)||'Unknown Artist',
     art:(t.artwork&&(t.artwork['480x480']||t.artwork['150x150']))||null,
-    duration:t.duration||0,fav:false,addedAt:Date.now()};
+    duration:t.duration||0,
+    playCount:t.play_count||0,
+    verified:!!(t.user&&t.user.is_verified),
+    isRemix:!!(t.remix_of&&t.remix_of.tracks&&t.remix_of.tracks.length),
+    fav:false,addedAt:Date.now()};
+}
+// True when a track is an original/official version (not a remix/edit/cover).
+function isOriginal(t){
+  return !t.isRemix && !REMIX_RE.test(t.title||'');
+}
+// Rank so the closest-to-official version comes first:
+// verified artists first, then most-played.
+function rankTracks(list){
+  return list.slice().sort((a,b)=>
+    (b.verified-a.verified) || (b.playCount-a.playCount));
 }
 async function audiusSearch(q){
   const url=`${AUDIUS}/v1/tracks/search?query=${encodeURIComponent(q)}&app_name=${APP}&limit=40`;
   const r=await fetch(url);const j=await r.json();
-  return (j.data||[]).filter(t=>t.is_streamable!==false).map(normalize);
+  const all=(j.data||[]).filter(t=>t.is_streamable!==false).map(normalize);
+  let originals=all.filter(isOriginal);
+  // If every match happened to be a remix/edit, fall back to the full set
+  // so the search never comes back empty — but still ranked.
+  if(!originals.length)originals=all;
+  return rankTracks(originals);
 }
 async function audiusTrending(){
-  const url=`${AUDIUS}/v1/tracks/trending?app_name=${APP}&limit=30`;
+  const url=`${AUDIUS}/v1/tracks/trending?app_name=${APP}&limit=40`;
   const r=await fetch(url);const j=await r.json();
-  return (j.data||[]).map(normalize);
+  const all=(j.data||[]).map(normalize);
+  const originals=all.filter(isOriginal);
+  return (originals.length?originals:all).slice(0,30);
 }
 function streamURL(t){return `${AUDIUS}/v1/tracks/${t.audiusId}/stream?app_name=${APP}`;}
 async function resolveURL(t){
@@ -297,12 +322,12 @@ function render(){
     let body;
     if(!results.length){
       body=`<div class="empty"><div class="big">🔎</div><h3>Search for anything</h3>
-        <p>Type an artist, song, or vibe. Tap to play instantly — tap + to save it to your library. Great for remixes, edits & unreleased drops.</p></div>`;
+        <p>Type an artist or song. Remixes, edits and covers are filtered out — you get the original version, ranked by popularity.</p></div>`;
     }else{
       const label=$('searchInput').value.trim()?'Results':'Trending now';
       body=`<div class="section-title">${label}</div>`+results.map(t=>songRow(t,'discover')).join('');
     }
-    main.innerHTML=body+`<div class="hint">Streaming free from Audius. Not every mainstream hit is here — anything missing, add it as a file from My Library.</div>`;
+    main.innerHTML=body+`<div class="hint">Streaming free from Audius (independent artists). Remixes are hidden. Anything missing — add it as a file from My Library.</div>`;
     return;
   }
   // library
